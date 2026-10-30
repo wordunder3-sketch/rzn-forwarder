@@ -1,0 +1,7 @@
+name = "rzn-forwarder"
+main = "worker.js"
+compatibility_date = "2024-10-01"
+
+[vars]
+FORUM_CHAT_ID = "-1003905818473"
+CHANNEL_USERNAME = "@rzn_graffiti_archive"
