@@ -1,14 +1,36 @@
+// Cloudflare Worker - RZN Channel -> Forum Forwarder + /id command
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'POST') {
       try {
         const update = await request.json();
-        const post = update.channel_post;
-        if (!post) {
-          return new Response('ok - not channel_post', { status: 200 });
-        }
         const BOT_TOKEN = env.BOT_TOKEN || '9036965917:AAFl2i0zVQ-AhSKYUy4i3OxonnVd-azv4_o';
         const FORUM_ID = parseInt(env.FORUM_CHAT_ID || '-1003905818473');
+
+        // === КОМАНДА /id - чтобы узнать ID топика ===
+        if (update.message && update.message.text && update.message.text.startsWith('/id')) {
+          const msg = update.message;
+          const threadId = msg.message_thread_id || 1;
+          const chatId = msg.chat.id;
+          
+          await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chat_id: chatId,
+              message_thread_id: threadId,
+              text: `📍 Chat ID: ${chatId}\n🧵 Thread ID: ${threadId}\n\nСкопируй Thread ID в THREADS в коде`
+            })
+          });
+          return new Response('ok - id sent', { status: 200 });
+        }
+
+        // === РЕПОСТ С КАНАЛА В ФОРУМ ===
+        const post = update.channel_post;
+        if (!post) {
+          return new Response('ok - not channel_post or id', { status: 200 });
+        }
+
         const caption = post.caption || post.text || '';
         const THREADS = {
           'JUST': 5,
@@ -22,6 +44,7 @@ export default {
           'OPA': 342,
           'GENERAL': 1
         };
+
         function detectThreadId(text) {
           const upper = (text || '').toUpperCase();
           const crewRaw = upper.split('|')[0].trim().split(' ')[0];
@@ -31,6 +54,7 @@ export default {
           }
           return 1;
         }
+
         const threadId = detectThreadId(caption);
         const url = `https://api.telegram.org/bot${BOT_TOKEN}/copyMessage`;
         const body = {
@@ -39,16 +63,20 @@ export default {
           message_id: post.message_id,
           message_thread_id: threadId
         };
+
         await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
         });
+
         return new Response(`ok -> thread ${threadId}`, { status: 200 });
+        
       } catch (e) {
         return new Response(`error: ${e.message}`, { status: 200 });
       }
     }
-    return new Response('RZN Forwarder Worker is running!', { status: 200 });
+    
+    return new Response('RZN Forwarder Worker is running! Use /id in forum topics to get Thread ID.', { status: 200 });
   }
 }
