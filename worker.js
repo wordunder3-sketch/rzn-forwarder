@@ -1,4 +1,4 @@
-const BOT_TOKEN = "9036965917:AAFl2i0zVQ-AhSKYUy4i3OxonnVd-azv4_o";
+BOT_TOKEN = "9036965917:AAFl2i0zVQ-AhSKYUy4i3OxonnVd-azv4_o";
 const FORUM_CHAT_ID = "-1003905818473";
 
 export default {
@@ -158,6 +158,3 @@ export default {
     } catch (e) {
       return new Response("error " + e.message, { status: 200 });
     }
-  }
-}
-
