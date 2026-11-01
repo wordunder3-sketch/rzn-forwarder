@@ -1,32 +1,32 @@
+const BOT_TOKEN = "9036965917:AAFl2i0zVQ-AhSKYUy4i3OxonnVd-azv4_o";
+const FORUM_CHAT_ID = "-1003905818473";
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    if (url.pathname === "/" && request.method === "GET") {
-      return new Response("RZN Forwarder + Stars OK - " + new Date().toISOString(), { status: 200 });
+    
+    if (url.pathname === "/") {
+      return new Response("RZN Bot v3 Stars - OK - " + new Date().toISOString(), { status: 200 });
     }
-    if (request.method !== "POST") return new Response("ok", { status: 200 });
+    if (request.method !== "POST") {
+      return new Response("ok", { status: 200 });
+    }
 
     try {
       const update = await request.json();
-      const BOT_TOKEN = env.BOT_TOKEN;
-      const FORUM_CHAT_ID = env.FORUM_CHAT_ID || "-1003905818473";
-
-      if (!BOT_TOKEN) {
-        return new Response("no BOT_TOKEN env", { status: 200 });
-      }
-
+      
       const api = async (method, body) => {
-        const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+        const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body)
         });
-        const j = await r.json();
-        // для дебага можно логировать, но пока тихо
+        const j = await res.json();
+        console.log(method, JSON.stringify(j).slice(0,500));
         return j;
       };
 
-      // 1. pre_checkout - ОБЯЗАТЕЛЬНО для Stars
+      // === PRE_CHECKOUT (обязательно!) ===
       if (update.pre_checkout_query) {
         await api("answerPreCheckoutQuery", {
           pre_checkout_query_id: update.pre_checkout_query.id,
@@ -35,38 +35,36 @@ export default {
         return new Response("ok", { status: 200 });
       }
 
-      // 2. callback кнопки
+      // === CALLBACK ===
       if (update.callback_query) {
         const cb = update.callback_query;
         const data = cb.data || "";
-        const chatId = cb.message?.chat?.id || cb.from?.id;
+        const chatId = cb.message?.chat?.id || cb.from.id;
+
+        await api("answerCallbackQuery", { callback_query_id: cb.id, text: "Готовлю счёт..." });
 
         if (data.startsWith("donate_")) {
           const amount = parseInt(data.split("_")[1]);
           const tiers = {
-            50: { title: "WRITER - RZN Archive", desc: "Бейдж † у ника + спасибо в канале" },
-            150: { title: "BOMBER - RZN Archive", desc: "Цветной ник, постинг без модерации" },
-            300: { title: "KING - RZN Archive", desc: "Приватный архив 2010-14, стена почёта" },
-            500: { title: "LEGEND - RZN Archive", desc: "Всё + оцифровка плёнок и зин" }
+            50: { title: "WRITER", desc: "Бейдж у ника + спасибо в канале" },
+            150: { title: "BOMBER", desc: "Цветной ник, без модерации" },
+            300: { title: "KING", desc: "Приватный архив 2010-14, стена почёта, HD" },
+            500: { title: "LEGEND", desc: "Всё + оцифровка плёнок и зин" }
           };
-          const tier = tiers[amount] || tiers[50];
-
-          await api("answerCallbackQuery", { callback_query_id: cb.id, text: `Готовлю счёт на ${amount} ⭐` });
-
+          const t = tiers[amount] || tiers[50];
           await api("sendInvoice", {
             chat_id: chatId,
-            title: tier.title,
-            description: tier.desc,
+            title: `${t.title} — Поддержка RZN`,
+            description: t.desc,
             payload: data,
             currency: "XTR",
-            prices: [{ label: "Поддержка", amount: amount }],
-            start_parameter: "rzn_donate"
+            prices: [{ label: "Поддержка архива", amount: amount }]
           });
         }
         return new Response("ok", { status: 200 });
       }
 
-      // 3. успешная оплата
+      // === SUCCESSFUL PAYMENT ===
       if (update.message?.successful_payment) {
         const msg = update.message;
         const pay = msg.successful_payment;
@@ -80,48 +78,49 @@ export default {
 
         await api("sendMessage", {
           chat_id: msg.chat.id,
-          text: `🔥 Ты теперь ${level}! Спасибо за ${amount} ⭐\n\nНапиши @Bttn ник на сайте — выдам бейдж.\nДеньги идут на сканер Epson V850.`
+          text: `🔥 Спасибо! Ты теперь ${level} архива!\n\nТы задонатил ${amount} ⭐\nНапиши @Bttn ник на сайте — выдам бейдж.`
         });
 
         try {
           await api("sendMessage", {
             chat_id: FORUM_CHAT_ID,
             message_thread_id: 1,
-            text: `💰 Донат ${amount} ⭐ — @${msg.from.username || msg.from.first_name} — ${level} — ${payload}`
+            text: `💰 Донат ${amount} ⭐ от @${msg.from.username || msg.from.first_name} — ${level}`
           });
         } catch(e){}
         return new Response("ok", { status: 200 });
       }
 
-      // 4. команды /start /id /donate /help
-      if (update.message?.text) {
-        const text = update.message.text.trim();
+      // === MESSAGES ===
+      if (update.message) {
+        const text = (update.message.text || "").trim();
         const chatId = update.message.chat.id;
         const threadId = update.message.message_thread_id;
+        const msgId = update.message.message_id;
 
-        // /id - для форума
+        // /id
         if (text.startsWith("/id")) {
           await api("sendMessage", {
             chat_id: chatId,
             message_thread_id: threadId,
             text: `📍 Chat ID: ${chatId}\n🧵 Thread ID: ${threadId || 1}`,
-            reply_to_message_id: update.message.message_id
+            reply_to_message_id: msgId
           });
           return new Response("ok", { status: 200 });
         }
 
-        // /start и /donate и /help - всё ведёт в донат-меню
-        if (text.startsWith("/start") || text.startsWith("/donate") || text.startsWith("/help") || text.toLowerCase().includes("донат")) {
+        // /start и /donate
+        if (text.startsWith("/start") || text.startsWith("/donate") || text.toLowerCase().includes("донат")) {
           await api("sendMessage", {
             chat_id: chatId,
             message_thread_id: threadId,
-            text: `RZN GRAFFITI ARCHIVE ⭐\n\nПривет! Это архив Рязани.\n\nЯ умею:\n• /id — узнать ID топика (в форуме)\n• /donate — поддержать архив звёздами\n\nДеньги идут на сканер плёнок 90-х, хостинг и печать зина.\n\nВыбери уровень:`,
+            text: `RZN GRAFFITI ARCHIVE\n\nПоддержи архив ⭐\nДеньги идут на сканер 90-х и хостинг.\n\nВыбери уровень:`,
             reply_markup: {
               inline_keyboard: [
                 [{ text: "WRITER — 50 ⭐ (бейдж)", callback_data: "donate_50" }],
-                [{ text: "BOMBER — 150 ⭐ (без модерации)", callback_data: "donate_150" }],
+                [{ text: "BOMBER — 150 ⭐ (без модера)", callback_data: "donate_150" }],
                 [{ text: "KING — 300 ⭐ (приват)", callback_data: "donate_300" }],
-                [{ text: "LEGEND — 500 ⭐ (зин)", callback_data: "donate_500" }]
+                [{ text: "LEGEND — 500 ⭐ (всё + зин)", callback_data: "donate_500" }]
               ]
             }
           });
@@ -129,30 +128,20 @@ export default {
         }
       }
 
-      // 5. форвард из канала @rzn_graffiti_archive в форум
+      // === CHANNEL POST FORWARD ===
       if (update.channel_post) {
         const post = update.channel_post;
         const caption = (post.caption || post.text || "").toUpperCase();
-
-        const THREADS = {
-          "JUST": 5, "ДЖАСТ": 5,
-          "NGL": 6,
-          "HGK": 7,
-          "ОПА": 342, "OPA": 342
-        };
-        const YEAR_THREADS = {
-          "2018": 20
-        };
-
+        const THREADS = { "JUST":5,"ДЖАСТ":5,"NGL":6,"HGK":7,"ОПА":342,"OPA":342 };
+        const YEAR_THREADS = { "2018":20,"2019":20,"2020":20,"2021":20,"2022":20,"2023":20,"2024":20 };
         const targets = new Set();
         for (const k in THREADS) if (caption.includes(k)) targets.add(THREADS[k]);
         const ym = caption.match(/#?20(1[4-9]|2[0-6])/);
         if (ym) {
-          const y = ym[0].replace(/[^0-9]/g,"");
-          if (YEAR_THREADS[y]) targets.add(YEAR_THREADS[y]);
+          const clean = ym[0].replace(/[^0-9]/g,"");
+          if (YEAR_THREADS[clean]) targets.add(YEAR_THREADS[clean]);
         }
-        if (targets.size === 0) targets.add(1);
-
+        if (targets.size===0) targets.add(1);
         for (const tid of targets) {
           try {
             await api("copyMessage", {
@@ -171,3 +160,4 @@ export default {
     }
   }
 }
+
