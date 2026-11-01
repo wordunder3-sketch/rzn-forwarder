@@ -1,5 +1,6 @@
 const BOT_TOKEN = "9036965917:AAFl2i0zVQ-AhSKYUy4i3OxonnVd-azv4_o";
 const FORUM_CHAT_ID = "-1003905818473";
+const CHANNEL_USERNAME = "@rzn_graffiti_archive"; // для теста
 
 export default {
   async fetch(request, env, ctx) {
@@ -9,14 +10,14 @@ export default {
         body: JSON.stringify(body)
       });
       const txt = await res.text();
-      try { return JSON.parse(txt); } catch(e){ return {ok:false, raw:txt}; }
+      try { return JSON.parse(txt); } catch(e){ return {ok:false, raw:txt.slice(0,500)}; }
     };
 
+    // ТЕСТ по GET - открой https://rzn-forwarder.wordunder3.workers.dev/ в браузере
     if (request.method === "GET") {
-      // тест без thread_id и с thread_id 1
-      const a = await api("sendMessage", { chat_id: FORUM_CHAT_ID, text: `✅ Тест БЕЗ thread_id - если видишь это в General, значит General = без ID` });
-      const b = await api("sendMessage", { chat_id: FORUM_CHAT_ID, message_thread_id: 1, text: `Тест С thread_id=1` });
-      return new Response(`Без thread: ${JSON.stringify(a)}\nС thread 1: ${JSON.stringify(b)}\n\nЕсли первое ok=true а второе false - то General надо слать без thread_id`, { status: 200 });
+      const r1 = await api("sendMessage", { chat_id: FORUM_CHAT_ID, message_thread_id: 1, text: `✅ Воркер живой! ${new Date().toISOString()}\nЕсли ты видишь это в General - бот админ и может писать.` });
+      const r2 = await api("getWebhookInfo", {});
+      return new Response(`TEST SEND to General: ${JSON.stringify(r1)}\n\nWEBHOOK: ${JSON.stringify(r2)}\n\nОткрой форум General - должно прийти сообщение. Если не пришло - бот НЕ админ или токен не тот.`, { status: 200 });
     }
 
     try {
@@ -24,48 +25,31 @@ export default {
 
       if (update.channel_post) {
         const post = update.channel_post;
-        const upper = (post.caption || post.text || "").toUpperCase();
-        
-        // ID из твоих скринов, General будем слать без ID
-        const THREADS = {
-          "JUST": 19,
-          "ДЖАСТ": 5,
-          "NGL": 6,
-          "HGK": 7,
-          "ОПА": 342, "OPA": 342
-        };
-        
-        let target = null; // null = General без thread_id
-        for (const k in THREADS) if (upper.includes(k)) { target = THREADS[k]; break; }
+        const fromId = post.chat.id;
+        const mid = post.message_id;
+        const cap = (post.caption || post.text || "").slice(0,200);
 
-        let res;
-        if (target === null) {
-          // General - БЕЗ message_thread_id
-          res = await api("copyMessage", { chat_id: FORUM_CHAT_ID, from_chat_id: post.chat.id, message_id: post.message_id });
+        // Пробуем 3 способа, пишем результат в General
+        // 1) copyMessage в General
+        let res = await api("copyMessage", { chat_id: FORUM_CHAT_ID, message_thread_id: 1, from_chat_id: fromId, message_id: mid });
+        if (!res.ok) {
+          await api("sendMessage", { chat_id: FORUM_CHAT_ID, message_thread_id: 1, text: `❌ copyMessage в General не сработал: ${res.description}\nfrom_chat_id=${fromId} message_id=${mid}\ncap=${cap}\n\nПробую forwardMessage...` });
+          // 2) forwardMessage
+          let res2 = await api("forwardMessage", { chat_id: FORUM_CHAT_ID, message_thread_id: 1, from_chat_id: fromId, message_id: mid });
+          if (!res2.ok) {
+            await api("sendMessage", { chat_id: FORUM_CHAT_ID, message_thread_id: 1, text: `❌ forward тоже упал: ${res2.description}\n\nПроверь что бот @rzn_archive_2026_bot админ в КАНАЛЕ тоже, и в форуме с правом 'Управление темами'` });
+          }
         } else {
-          // Команда - С thread_id
-          res = await api("copyMessage", { chat_id: FORUM_CHAT_ID, message_thread_id: target, from_chat_id: post.chat.id, message_id: post.message_id });
-          if (!res.ok) {
-            // фолбек в General без ID
-            await api("sendMessage", { chat_id: FORUM_CHAT_ID, text: `⚠️ Не скопировал в ${target}: ${res.description}, кидаю в General` });
-            res = await api("copyMessage", { chat_id: FORUM_CHAT_ID, from_chat_id: post.chat.id, message_id: post.message_id });
+          // если в General скопировалось - копируем в нужную папку
+          const upper = (post.caption || post.text || "").toUpperCase();
+          const THREADS = { "JUST": 19, "ДЖАСТ": 5, "NGL": 6, "HGK": 7, "ОПА": 342, "OPA": 342 };
+          let target = 1;
+          for (const k in THREADS) if (upper.includes(k)) { target = THREADS[k]; break; }
+          if (target !== 1) {
+            await api("copyMessage", { chat_id: FORUM_CHAT_ID, message_thread_id: target, from_chat_id: fromId, message_id: mid });
           }
         }
       }
-
-      // команды /id - всегда отвечаем с тем thread_id в котором спросили
-      if (update.message) {
-        const t = (update.message.text || "").trim();
-        if (t.startsWith("/id")) {
-          await api("sendMessage", {
-            chat_id: update.message.chat.id,
-            message_thread_id: update.message.message_thread_id,
-            text: `📍 Chat: ${update.message.chat.id}\n🧵 Thread: ${update.message.message_thread_id||'General (без ID)'}`,
-            reply_to_message_id: update.message.message_id
-          });
-        }
-      }
-
       return new Response("ok", {status:200});
     } catch(e){ return new Response("ok", {status:200}); }
   }
