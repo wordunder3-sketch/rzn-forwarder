@@ -4,11 +4,11 @@ const FORUM_CHAT_ID = "-1003905818473";
 export default {
   async fetch(request, env, ctx) {
     if (request.method === "GET") {
-      return new Response("RZN FINAL v5 NO-YEAR-FOLDERS - OK " + new Date().toISOString(), { status: 200 });
+      return new Response("RZN v6 DEBUG FORWARD - OK " + new Date().toISOString(), { status: 200 });
     }
-
     try {
       const update = await request.json();
+      console.log("UPDATE TYPE:", Object.keys(update).join(','), JSON.stringify(update).slice(0,3000));
 
       const api = async (method, body) => {
         const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
@@ -17,89 +17,50 @@ export default {
           body: JSON.stringify(body)
         });
         const txt = await res.text();
+        console.log(`API ${method} -> ${res.status}: ${txt.slice(0,2000)}`);
         try { return JSON.parse(txt); } catch(e){ return {ok:false, raw:txt}; }
       };
 
-      // Stars - pre_checkout
       if (update.pre_checkout_query) {
         await api("answerPreCheckoutQuery", { pre_checkout_query_id: update.pre_checkout_query.id, ok: true });
         return new Response("ok", { status: 200 });
       }
-
-      // Stars - callback (оплата)
       if (update.callback_query) {
         const cb = update.callback_query;
         const data = cb.data || "";
         const chatId = cb.message?.chat?.id || cb.from.id;
-
         if (data.startsWith("donate_")) {
           const amount = parseInt(data.split("_")[1]);
-          const tiers = {
-            50: { title: "WRITER — RZN", desc: "Бейдж † у ника" },
-            150: { title: "BOMBER — RZN", desc: "Цветной ник + без модерации" },
-            300: { title: "KING — RZN", desc: "Приватный архив + стена почёта" },
-            500: { title: "LEGEND — RZN", desc: "Всё + оцифровка плёнок и зин" }
-          };
-          const t = tiers[amount] || tiers[50];
           await api("answerCallbackQuery", { callback_query_id: cb.id, text: `Счёт на ${amount} ⭐` });
           await api("sendInvoice", {
             chat_id: chatId,
-            title: `${t.title} — Поддержка`,
-            description: t.desc,
+            title: `Поддержка RZN - ${amount} ⭐`,
+            description: `Поддержка архива ${amount} звёзд`,
             payload: data,
             currency: "XTR",
             prices: [{ label: "Поддержка", amount: amount }]
           });
-        } else {
-          await api("answerCallbackQuery", { callback_query_id: cb.id, text: "Кнопка работает!" });
         }
         return new Response("ok", { status: 200 });
       }
-
-      // Stars - успешная оплата
       if (update.message?.successful_payment) {
         const msg = update.message;
-        const pay = msg.successful_payment;
-        const amount = pay.total_amount;
-        let level = "WRITER";
-        if (pay.invoice_payload.includes("500")) level = "LEGEND";
-        else if (pay.invoice_payload.includes("300")) level = "KING";
-        else if (pay.invoice_payload.includes("150")) level = "BOMBER";
-
-        await api("sendMessage", {
-          chat_id: msg.chat.id,
-          text: `🔥 Ты теперь ${level}! Спасибо за ${amount} ⭐`
-        });
-        try {
-          await api("sendMessage", {
-            chat_id: FORUM_CHAT_ID,
-            message_thread_id: 1,
-            text: `💰 Донат ${amount} ⭐ от @${msg.from.username || msg.from.first_name} — ${level}`
-          });
-        } catch(e){}
+        await api("sendMessage", { chat_id: msg.chat.id, text: `🔥 Спасибо за ${msg.successful_payment.total_amount} ⭐! Ты KING!` });
         return new Response("ok", { status: 200 });
       }
-
-      // Команды /id /start /donate
       if (update.message) {
         const text = (update.message.text || "").trim();
         const chatId = update.message.chat.id;
         const threadId = update.message.message_thread_id;
-
         if (text.startsWith("/id")) {
-          await api("sendMessage", {
-            chat_id: chatId,
-            message_thread_id: threadId,
-            text: `📍 Chat ID: ${chatId}\n🧵 Thread ID: ${threadId||1}`,
-            reply_to_message_id: update.message.message_id
-          });
+          await api("sendMessage", { chat_id: chatId, message_thread_id: threadId, text: `Chat: ${chatId}\nThread: ${threadId||1}`, reply_to_message_id: update.message.message_id });
           return new Response("ok", { status: 200 });
         }
         if (text.startsWith("/start") || text.startsWith("/donate") || text.toLowerCase().includes("донат")) {
           await api("sendMessage", {
             chat_id: chatId,
             message_thread_id: threadId,
-            text: `RZN GRAFFITI ARCHIVE ⭐\nАрхив держится на энтузиазме.\nДеньги идут на сканер 90-х и хостинг.\n\nВыбери уровень:`,
+            text: `RZN ARCHIVE ⭐\n\nВыбери уровень:`,
             reply_markup: {
               inline_keyboard: [
                 [{ text: "WRITER — 50 ⭐", callback_data: "donate_50" }],
@@ -113,51 +74,44 @@ export default {
         }
       }
 
-      // === ФОРВАРД ИЗ КАНАЛА В ФОРУМ - НОВАЯ ЛОГИКА БЕЗ ГОДОВЫХ ПАПОК ===
+      // === ФОРВАРД КАНАЛ -> ФОРУМ ===
       if (update.channel_post) {
         const post = update.channel_post;
         const caption = (post.caption || post.text || "");
         const upper = caption.toUpperCase();
+        console.log("CHANNEL_POST received! Chat:", post.chat.id, "Caption:", caption.slice(0,500));
 
-        // Только папки команд, без годов!
         const THREADS = {
           "JUST": 5, "ДЖАСТ": 5,
           "NGL": 6,
           "HGK": 7,
-          "ОПА": 342, "OPA": 342
-          // добавь остальные команды через /id, но НЕ годы
+          "ОПА": 342, "OPA": 342,
+          "RAS": 5, "RASOE": 5
         };
 
-        // Ищем команду в тексте (поддерживаем и #HGK и #HGK2018 и JUST)
-        let targetThread = null;
+        let targetThread = 1; // General по умолчанию
         for (const k in THREADS) {
           if (upper.includes(k)) {
             targetThread = THREADS[k];
+            console.log(`MATCH crew ${k} -> thread ${targetThread}`);
             break;
           }
-          // также ищем #HGK2018 -> содержит HGK
-          // уже покрыто upper.includes
         }
 
-        // Если не нашли команду - в General (ID 1)
-        if (!targetThread) targetThread = 1;
+        console.log(`Copying to forum ${FORUM_CHAT_ID} thread ${targetThread}`);
 
-        // Копируем только в ОДНУ папку команды, не в годовые!
-        // Хештеги #HGK2018 #Ama остаются в тексте и кликабельны в форуме
-        try {
-          await api("copyMessage", {
-            chat_id: FORUM_CHAT_ID,
-            message_thread_id: targetThread,
-            from_chat_id: post.chat.id,
-            message_id: post.message_id
-          });
-        } catch(e){
-          console.log("COPY ERR", e);
-        }
+        const result = await api("copyMessage", {
+          chat_id: FORUM_CHAT_ID,
+          message_thread_id: targetThread,
+          from_chat_id: post.chat.id,
+          message_id: post.message_id
+        });
+        console.log("copyMessage result:", JSON.stringify(result).slice(0,2000));
       }
 
       return new Response("ok", { status: 200 });
     } catch (e) {
+      console.log("FATAL:", e.message, e.stack);
       return new Response("ok", { status: 200 });
     }
   }
