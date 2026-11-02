@@ -1,6 +1,5 @@
 const BOT_TOKEN = "9036965917:AAFl2i0zVQ-AhSKYUy4i3OxonnVd-azv4_o";
 const FORUM_CHAT_ID = "-1003905818473";
-const CHANNEL_ID = "-1001383119145"; // из твоего лога
 
 export default {
   async fetch(request, env, ctx) {
@@ -14,50 +13,93 @@ export default {
     };
 
     if (request.method === "GET") {
-      // тест: пишем в General без thread и в Hgk с thread 7
-      const a = await api("sendMessage", { chat_id: FORUM_CHAT_ID, text: `✅ v13 LIVE ${new Date().toISOString()} - General без thread_id работает` });
-      const b = await api("sendMessage", { chat_id: FORUM_CHAT_ID, message_thread_id: 7, text: `✅ v13 LIVE - Hgk топик 7 работает` });
-      const wh = await api("getWebhookInfo", {});
-      return new Response(`General без thread: ${JSON.stringify(a)}\nHgk с thread 7: ${JSON.stringify(b)}\n\nWebhook: ${JSON.stringify(wh)}\n\nЕсли оба ok=true - воркер может писать везде`, { status: 200 });
+      const a = await api("sendMessage", { chat_id: FORUM_CHAT_ID, text: `✅ v14 STARS FIXED ${new Date().toISOString()} - General без thread_id + звёзды` });
+      return new Response(`v14: ${JSON.stringify(a)}`, { status: 200 });
     }
 
     try {
       const update = await request.json();
 
-      if (update.channel_post) {
-        const post = update.channel_post;
-        const cap = (post.caption || post.text || "");
-        const upper = cap.toUpperCase();
-
-        const THREADS = {
-          "JUST": 19, "ДЖАСТ": 5, "NGL": 6, "HGK": 7, "ОПА": 342, "OPA": 342
-        };
-        let target = null;
-        for (const k in THREADS) if (upper.includes(k)) { target = THREADS[k]; break; }
-
-        let copyParams;
-        if (target === null) {
-          // General - БЕЗ message_thread_id (критично!)
-          copyParams = { chat_id: FORUM_CHAT_ID, from_chat_id: post.chat.id, message_id: post.message_id };
-        } else {
-          copyParams = { chat_id: FORUM_CHAT_ID, message_thread_id: target, from_chat_id: post.chat.id, message_id: post.message_id };
-        }
-
-        const res = await api("copyMessage", copyParams);
-        if (!res.ok) {
-          // пишем ошибку в General БЕЗ thread_id чтобы ты увидел
-          await api("sendMessage", {
-            chat_id: FORUM_CHAT_ID,
-            text: `❌ COPY FAIL в ${target||'General'}: ${res.description}\nfrom=${post.chat.id} mid=${post.message_id}\ncap=${cap.slice(0,150)}`
-          });
-        }
+      // Stars - pre_checkout
+      if (update.pre_checkout_query) {
+        await api("answerPreCheckoutQuery", { pre_checkout_query_id: update.pre_checkout_query.id, ok: true });
+        return new Response("ok", { status: 200 });
       }
 
-      if (update.message && update.message.text?.startsWith("/id")) {
-        const tid = update.message.message_thread_id;
-        let payload = { chat_id: update.message.chat.id, text: `📍 Chat: ${update.message.chat.id}\n🧵 Thread: ${tid||'General БЕЗ ID'}`, reply_to_message_id: update.message.message_id };
-        if (tid) payload.message_thread_id = tid;
-        await api("sendMessage", payload);
+      // Stars - callback (кнопки доната)
+      if (update.callback_query) {
+        const cb = update.callback_query;
+        const data = cb.data || "";
+        const chatId = cb.message?.chat?.id || cb.from.id;
+        const msgThread = cb.message?.message_thread_id;
+
+        if (data.startsWith("donate_")) {
+          const amount = parseInt(data.split("_")[1]);
+          const tiers = {
+            50: { title: "WRITER — RZN", desc: "Бейдж † у ника" },
+            150: { title: "BOMBER — RZN", desc: "Цветной ник + без модерации" },
+            300: { title: "KING — RZN", desc: "Приватный архив + стена почёта" },
+            500: { title: "LEGEND — RZN", desc: "Всё + оцифровка плёнок и зин" }
+          };
+          const t = tiers[amount] || tiers[50];
+          await api("answerCallbackQuery", { callback_query_id: cb.id, text: `Счёт на ${amount} ⭐` });
+          let invPayload = { chat_id: chatId, title: `${t.title} — Поддержка`, description: t.desc, payload: data, currency: "XTR", prices: [{ label: "Поддержка", amount: amount }] };
+          if (msgThread) invPayload.message_thread_id = msgThread;
+          await api("sendInvoice", invPayload);
+        } else {
+          await api("answerCallbackQuery", { callback_query_id: cb.id, text: "Кнопка работает!" });
+        }
+        return new Response("ok", { status: 200 });
+      }
+
+      // Stars - успешная оплата
+      if (update.message?.successful_payment) {
+        const msg = update.message;
+        const pay = msg.successful_payment;
+        const amount = pay.total_amount;
+        let level = "WRITER";
+        if (pay.invoice_payload.includes("500")) level = "LEGEND";
+        else if (pay.invoice_payload.includes("300")) level = "KING";
+        else if (pay.invoice_payload.includes("150")) level = "BOMBER";
+
+        await api("sendMessage", { chat_id: msg.chat.id, text: `🔥 Ты теперь ${level}! Спасибо за ${amount} ⭐`, message_thread_id: msg.message_thread_id });
+        try {
+          // в General БЕЗ thread_id
+          await api("sendMessage", { chat_id: FORUM_CHAT_ID, text: `💰 Донат ${amount} ⭐ от @${msg.from.username || msg.from.first_name} — ${level}` });
+        } catch(e){}
+        return new Response("ok", { status: 200 });
+      }
+
+      // Команды /id /start /donate
+      if (update.message) {
+        const text = (update.message.text || "").trim();
+        const chatId = update.message.chat.id;
+        const threadId = update.message.message_thread_id;
+
+        if (text.startsWith("/id")) {
+          let payload = { chat_id: chatId, text: `📍 Chat ID: ${chatId}\n🧵 Thread ID: ${threadId||"General (без ID)"}`, reply_to_message_id: update.message.message_id };
+          if (threadId) payload.message_thread_id = threadId;
+          await api("sendMessage", payload);
+          return new Response("ok", { status: 200 });
+        }
+
+        if (text.startsWith("/start") || text.startsWith("/donate") || text.toLowerCase().includes("донат")) {
+          let payload = {
+            chat_id: chatId,
+            text: `RZN GRAFFITI ARCHIVE ⭐\nАрхив держится на энтузиазме.\nДеньги идут на сканер 90-х и хостинг.\n\nВыбери уровень:`,
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "WRITER — 50 ⭐", callback_data: "donate_50" }],
+                [{ text: "BOMBER — 150 ⭐", callback_data: "donate_150" }],
+                [{ text: "KING — 300 ⭐", callback_data: "donate_300" }],
+                [{ text: "LEGEND — 500 ⭐", callback_data: "donate_500" }]
+              ]
+            }
+          };
+          if (threadId) payload.message_thread_id = threadId;
+          await api("sendMessage", payload);
+          return new Response("ok", { status: 200 });
+        }
       }
 
       return new Response("ok", { status: 200 });
