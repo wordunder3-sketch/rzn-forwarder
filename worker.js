@@ -1,174 +1,177 @@
-// RZN v16 SECURE — GOLDEN v14 + Secrets + Verified Auth
-// Токен НЕ в коде, берется только из env: BOT_TOKEN, ADMIN_TELEGRAM_ID, SESSION_SECRET
-// GOLDEN v14 поведение сохранено: dual-send канал+форум, 1 копия, без года/района, хештеги только в Telegram
+// RZN v16 SECURE Worker - BOT_TOKEN только из env, проверка Telegram initData
+// В Cloudflare Dashboard -> Workers -> rzn-forwarder -> Settings -> Variables:
+//  BOT_TOKEN = 903696... (НОВЫЙ после ротации, старый уже утек в фронт)
+//  ADMIN_TELEGRAM_ID = 123456789 (твой Telegram ID, узнай через @userinfobot)
+//  SESSION_SECRET = случайная длинная строка
 
-const FORUM_ID = -1003905818473;
-const CHANNEL = "@rzn_graffiti_archive";
-const TOPICS = { "HGK": 7, "NGL": 6, "Джаст": 5, "Just": 19, "ОПА": 342 };
-const TIERS = { WRITER: 50, BOMBER: 150, KING: 300, LEGEND: 500 };
+const FORUM_CHAT_ID = "-1003905818473";
 
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST,OPTIONS", "Access-Control-Allow-Headers": "Content-Type,Authorization" }
-  });
+function json(data, status=200){
+  return new Response(JSON.stringify(data), { status, headers: {"Content-Type":"application/json", "Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type"} });
 }
 
-async function tg(env, method, body) {
-  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-  return r.json();
+async function hmacSha256(key, message){
+  let k = await crypto.subtle.importKey("raw", key, {name:"HMAC", hash:"SHA-256"}, false, ["sign"]);
+  let sig = await crypto.subtle.sign("HMAC", k, new TextEncoder().encode(message));
+  return new Uint8Array(sig);
 }
+function toHex(bytes){ return [...bytes].map(b=>b.toString(16).padStart(2,'0')).join(''); }
+async function sha256Bytes(text){ let d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)); return new Uint8Array(d); }
 
-function esc(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
-
-// Проверка Telegram initData (WebApp)
-async function verifyInitData(env, initData) {
-  try {
-    const params = new URLSearchParams(initData);
-    const hash = params.get("hash");
-    if (!hash) return null;
+async function verifyInitData(initData, botToken){
+  try{
+    let params = new URLSearchParams(initData);
+    let hash = params.get("hash");
+    if(!hash) return null;
     params.delete("hash");
-    const checkString = [...params.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([k, v]) => `${k}=${v}`).join("\n");
-    const secretKey = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("WebAppData" + env.BOT_TOKEN));
-    const key = await crypto.subtle.importKey("raw", secretKey, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-    const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(checkString));
-    const hex = [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, "0")).join("");
-    if (hex !== hash) return null;
-    const user = JSON.parse(params.get("user") || "{}");
-    return user;
-  } catch { return null; }
+    // Проверка срока - не старше 24ч
+    let authDate = parseInt(params.get("auth_date")||"0");
+    if(Date.now()/1000 - authDate > 86400) return null;
+    // Сортировка ключей
+    let keys = [...params.keys()].sort();
+    let check = keys.map(k=> k+"="+params.get(k)).join("\n");
+    let secret = await hmacSha256(new TextEncoder().encode("WebAppData"), botToken);
+    let calc = await hmacSha256(secret, check);
+    let calcHex = toHex(calc);
+    if(calcHex !== hash) return null;
+    let user = JSON.parse(params.get("user")||"{}");
+    if(!user.id) return null;
+    return user; // {id, first_name, username, ...}
+  }catch(e){ return null; }
 }
 
-async function makeSession(env, user) {
-  const exp = Date.now() + 1000 * 60 * 60 * 24 * 30;
-  const payload = `${user.id}.${exp}`;
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.SESSION_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
-  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  const isAdmin = String(user.id) === String(env.ADMIN_TELEGRAM_ID);
-  return { token: `${payload}.${sigB64}`, user, isAdmin, exp };
-}
-
-async function verifySession(env, token) {
-  try {
-    const [id, exp, sigB64] = token.split(".");
-    if (Date.now() > Number(exp)) return null;
-    const payload = `${id}.${exp}`;
-    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.SESSION_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
-    const sigBytes = Uint8Array.from(atob(sigB64.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
-    const ok = await crypto.subtle.verify("HMAC", key, sigBytes, new TextEncoder().encode(payload));
-    if (!ok) return null;
-    return { id: Number(id), isAdmin: String(id) === String(env.ADMIN_TELEGRAM_ID) };
-  } catch { return null; }
+async function makeSessionToken(telegramId, sessionSecret){
+  let payload = telegramId + "." + Math.floor(Date.now()/1000);
+  let sig = await hmacSha256(new TextEncoder().encode(sessionSecret), payload);
+  return payload + "." + toHex(sig).slice(0,32);
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx){
+    const BOT_TOKEN = env.BOT_TOKEN || "";
+    const SESSION_SECRET = env.SESSION_SECRET || "change-me";
+    const ADMIN_ID = String(env.ADMIN_TELEGRAM_ID || "");
+
+    if(request.method === "OPTIONS") return new Response(null, {status:204, headers:{"Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type"}});
+
     const url = new URL(request.url);
-    if (request.method === "OPTIONS") return json({ ok: true });
 
-    // Проверка что секреты на месте
-    if (url.pathname === "/" || url.pathname === "/health") {
-      return json({ ok: true, version: "v16 SECURE", auth: "ready", has_token: !!env.BOT_TOKEN, has_admin: !!env.ADMIN_TELEGRAM_ID, has_session: !!env.SESSION_SECRET });
+    // === /auth - проверка Telegram initData, выдача session ===
+    if(url.pathname === "/auth" && request.method === "POST"){
+      try{
+        let body = await request.json().catch(()=>({}));
+        let initData = body.initData || "";
+        if(!BOT_TOKEN) return json({ok:false, error:"BOT_TOKEN not set in env"}, 500);
+        let user = await verifyInitData(initData, BOT_TOKEN);
+        if(!user) return json({ok:false, error:"invalid initData"}, 401);
+        let token = await makeSessionToken(String(user.id), SESSION_SECRET);
+        let isAdmin = String(user.id)===ADMIN_ID; return json({ok:true, telegram_id: String(user.id), first_name: user.first_name||"", username: user.username||"", is_admin: isAdmin, isAdmin: isAdmin, session_token: token, token: token});
+      }catch(e){ return json({ok:false, error: String(e)}, 500); }
     }
 
-    // --- AUTH для сайта: сайт шлет initData, мы проверяем и выдаем сессию ---
-    if (url.pathname === "/auth" && request.method === "POST") {
-      const { initData } = await request.json().catch(() => ({}));
-      const user = await verifyInitData(env, initData || "");
-      if (!user || !user.id) return json({ ok: false, error: "bad_initData" }, 401);
-      const sess = await makeSession(env, user);
-      return json({ ok: true, ...sess });
+    // === /send - отправка в канал + архив форум, только по сессии админа ===
+    if(url.pathname === "/send" && request.method === "POST"){
+      try{
+        let auth = request.headers.get("Authorization") || "";
+        let token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+        if(!token) return json({ok:false, error:"no token"}, 401);
+        // token = telegramId.timestamp.sig (sig = HMAC(SESSION_SECRET, telegramId.timestamp).slice 0,32)
+        let parts = token.split(".");
+        if(parts.length!==3) return json({ok:false, error:"bad token"}, 401);
+        let payload = parts[0] + "." + parts[1];
+        let sig = await hmacSha256(new TextEncoder().encode(SESSION_SECRET), payload);
+        let expect = toHex(sig).slice(0,32);
+        if(expect !== parts[2]) return json({ok:false, error:"bad sig"}, 401);
+        if(String(parts[0]) !== ADMIN_ID) return json({ok:false, error:"not admin"}, 403);
+        let body = await request.json().catch(()=>({}));
+        let author = body.author || "";
+        let title = body.title || body.tag || "";
+        let crew = body.crew || "";
+        let photo = body.photo || body.imgUrl || body.image_url || "";
+        let comment = body.comment || body.year || "";
+        if(!photo) return json({ok:false, error:"no photo"}, 400);
+        let cap = (crew?`👥 ${crew} `:'') + `🎨 ${title} | ${comment}\n👤 ${author}`;
+        // 1. В канал
+        let r1 = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({chat_id:"@rzn_graffiti_archive", photo: photo, caption: cap})});
+        let j1 = await r1.json().catch(()=>({ok:false}));
+        // 2. В форум архив
+        let THREADS_MAP = {"JUST":19,"ДЖАСТ":5,"NGL":6,"HGK":7,"ОПА":342,"OPA":342};
+        let upper = (crew+" "+title).toUpperCase();
+        let target = null;
+        for(const k in THREADS_MAP){ if(upper.includes(k)){ target=THREADS_MAP[k]; break; } }
+        let payload2 = {chat_id: FORUM_CHAT_ID, photo: photo, caption: cap};
+        if(target!==null) payload2.message_thread_id = target;
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload2)});
+        return json({ok: !!j1.ok, channel: j1});
+      }catch(e){ return json({ok:false, error: String(e)}, 500); }
     }
 
-    // --- SEND с сайта: только с валидной сессией ---
-    if (url.pathname === "/send" && request.method === "POST") {
-      const auth = request.headers.get("Authorization") || "";
-      const token = auth.replace("Bearer ", "");
-      const sess = await verifySession(env, token);
-      if (!sess) return json({ ok: false, error: "unauthorized" }, 401);
+    const api = async (method, body) => {
+      const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+      const txt = await res.text();
+      try{ return JSON.parse(txt); }catch(e){ return {ok:false, raw:txt}; }
+    };
 
-      const data = await request.json().catch(() => ({}));
-      const { author, title, crew, photo, comment } = data;
-      // На сайте НЕТ хештегов, НЕТ района, НЕТ года
-      const captionSite = `✍️ ${esc(author)}\n${esc(title || "")}\n${crew ? `Команда: ${esc(crew)}` : ""}\n${comment ? esc(comment) : ""}`.trim();
-      // В Telegram — с хештегами
-      const hashtags = crew ? `#${crew.replace(/[^A-Za-zА-Яа-я0-9_]/g, "")} #RZN #Graffiti #Ryazan` : `#RZN #Graffiti #Ryazan`;
-      const captionTG = captionSite + `\n\n${hashtags}`;
-
-      // 1. Канал
-      let channelMsg = null;
-      if (photo) channelMsg = await tg(env, "sendPhoto", { chat_id: CHANNEL, photo, caption: captionTG });
-      else channelMsg = await tg(env, "sendMessage", { chat_id: CHANNEL, text: captionTG });
-
-      // 2. Форум — 1 копия, в топик по команде, General без thread_id если нет топика
-      const threadId = TOPICS[crew] || null;
-      const forumBody = photo
-        ? { chat_id: FORUM_ID, photo, caption: captionTG, ...(threadId ? { message_thread_id: threadId } : {}) }
-        : { chat_id: FORUM_ID, text: captionTG, ...(threadId ? { message_thread_id: threadId } : {}) };
-      const forumMsg = await tg(env, photo ? "sendPhoto" : "sendMessage", forumBody);
-
-      return json({ ok: true, channel: channelMsg, forum: forumMsg, author_id: sess.id, isAdmin: sess.isAdmin });
+    // === Telegram webhook - звёзды /id /start (как в v14) ===
+    if(request.method === "GET"){
+      // Не шлем сообщение при каждом GET в v16, чтобы не спамить - просто пинг
+      return new Response("v16 SECURE ok - /auth ready", {status:200});
     }
 
-    // --- Telegram Webhook: /start, донаты Stars ---
-    if (request.method === "POST") {
-      const upd = await request.json().catch(() => ({}));
-      // Stars: pre_checkout
-      if (upd.pre_checkout_query) {
-        await tg(env, "answerPreCheckoutQuery", { pre_checkout_query_id: upd.pre_checkout_query.id, ok: true });
-        return json({ ok: true });
+    try{
+      const update = await request.json();
+      if(update.pre_checkout_query){
+        await api("answerPreCheckoutQuery", {pre_checkout_query_id: update.pre_checkout_query.id, ok:true});
+        return new Response("ok", {status:200});
       }
-      // Stars: успешный платеж
-      if (upd.message?.successful_payment) {
-        const pay = upd.message.successful_payment;
-        const chatId = upd.message.chat.id;
-        const amount = pay.total_amount; // в Stars
-        let tier = "WRITER";
-        if (amount >= 500) tier = "LEGEND"; else if (amount >= 300) tier = "KING"; else if (amount >= 150) tier = "BOMBER";
-        await tg(env, "sendMessage", { chat_id: chatId, text: `Спасибо! ⭐ ${amount} Stars — титул ${tier} активирован.\n\nЗагружай свои теги в приложении RZN GRAFFITI TAGS.` });
-        return json({ ok: true });
+      if(update.callback_query){
+        const cb = update.callback_query;
+        const data = cb.data || "";
+        const chatId = cb.message?.chat?.id || cb.from.id;
+        const msgThread = cb.message?.message_thread_id;
+        if(data.startsWith("donate_")){
+          const amount = parseInt(data.split("_")[1]);
+          const tiers = {50:{title:"WRITER — RZN", desc:"Бейдж у ника"},150:{title:"BOMBER — RZN", desc:"Цветной ник + без модерации"},300:{title:"KING — RZN", desc:"Приватный архив + стена почёта"},500:{title:"LEGEND — RZN", desc:"Всё + оцифровка плёнок и зин"}};
+          const t = tiers[amount] || tiers[50];
+          await api("answerCallbackQuery", {callback_query_id: cb.id, text: `Счёт на ${amount} ⭐`});
+          let inv = {chat_id: chatId, title: `${t.title} — Поддержка`, description: t.desc, payload: data, currency:"XTR", prices:[{label:"Поддержка", amount}]};
+          if(msgThread) inv.message_thread_id = msgThread;
+          await api("sendInvoice", inv);
+        } else {
+          await api("answerCallbackQuery", {callback_query_id: cb.id, text:"Кнопка работает!"});
+        }
+        return new Response("ok", {status:200});
       }
-      const msg = upd.message || upd.callback_query?.message;
-      const text = upd.message?.text || upd.callback_query?.data || "";
-      const chatId = msg?.chat?.id;
-      if (chatId && text === "/start") {
-        await tg(env, "sendMessage", {
-          chat_id: chatId,
-          text: `Привет! Это архив RZN GRAFFITI TAGS.\n\n📸 Загружай теги в приложении\n⭐ Донат — /donate\n\nWRITER 50 ⭐ | BOMBER 150 ⭐ | KING 300 ⭐ | LEGEND 500 ⭐`,
-          reply_markup: { inline_keyboard: [[{ text: "⭐ Донат — поддержать архив", callback_data: "donate" }]] }
-        });
-        return json({ ok: true });
+      if(update.message?.successful_payment){
+        const msg = update.message;
+        const pay = msg.successful_payment;
+        const amount = pay.total_amount;
+        let level="WRITER";
+        if(pay.invoice_payload.includes("500")) level="LEGEND";
+        else if(pay.invoice_payload.includes("300")) level="KING";
+        else if(pay.invoice_payload.includes("150")) level="BOMBER";
+        await api("sendMessage", {chat_id: msg.chat.id, text: `Ты теперь ${level}! Спасибо за ${amount} ⭐`, message_thread_id: msg.message_thread_id});
+        try{ await api("sendMessage", {chat_id: FORUM_CHAT_ID, text: `Донат ${amount} ⭐ от @${msg.from.username||msg.from.first_name} — ${level}`}); }catch(e){}
+        return new Response("ok", {status:200});
       }
-      if (upd.callback_query?.data === "donate" || text === "/donate") {
-        const cid = upd.callback_query?.message?.chat?.id || chatId;
-        await tg(env, "sendMessage", {
-          chat_id: cid, text: "Выбери титул:",
-          reply_markup: { inline_keyboard: [
-            [{ text: "WRITER — 50 ⭐", callback_data: "buy_WRITER" }],
-            [{ text: "BOMBER — 150 ⭐", callback_data: "buy_BOMBER" }],
-            [{ text: "KING — 300 ⭐", callback_data: "buy_KING" }],
-            [{ text: "LEGEND — 500 ⭐", callback_data: "buy_LEGEND" }]
-          ]}
-        });
-        return json({ ok: true });
+      if(update.message){
+        const text = (update.message.text||"").trim();
+        const chatId = update.message.chat.id;
+        const threadId = update.message.message_thread_id;
+        if(text.startsWith("/id")){
+          let p = {chat_id: chatId, text: `Chat ID: ${chatId}\nThread ID: ${threadId||"General (без ID)"}`, reply_to_message_id: update.message.message_id};
+          if(threadId) p.message_thread_id = threadId;
+          await api("sendMessage", p);
+          return new Response("ok", {status:200});
+        }
+        if(text.startsWith("/start") || text.startsWith("/donate") || text.toLowerCase().includes("донат")){
+          let p = {chat_id: chatId, text: `RZN GRAFFITI ARCHIVE ⭐\nАрхив держится на энтузиазме.\nВыбери уровень:`, reply_markup:{inline_keyboard:[[{text:"WRITER — 50 ⭐", callback_data:"donate_50"}],[{text:"BOMBER — 150 ⭐", callback_data:"donate_150"}],[{text:"KING — 300 ⭐", callback_data:"donate_300"}],[{text:"LEGEND — 500 ⭐", callback_data:"donate_500"}]]}};
+          if(threadId) p.message_thread_id = threadId;
+          await api("sendMessage", p);
+          return new Response("ok", {status:200});
+        }
       }
-      if (upd.callback_query?.data?.startsWith("buy_")) {
-        const tier = upd.callback_query.data.replace("buy_", "");
-        const price = TIERS[tier] || 50;
-        const cid = upd.callback_query.message.chat.id;
-        await tg(env, "sendInvoice", {
-          chat_id: cid, title: `Титул ${tier}`, description: `Поддержка архива RZN. Титул ${tier} в профиле.`,
-          payload: `tier_${tier}`, currency: "XTR", prices: [{ label: tier, amount: price }]
-        });
-        return json({ ok: true });
-      }
-      return json({ ok: true });
-    }
-    return json({ ok: false, error: "not_found" }, 404);
+      return new Response("ok", {status:200});
+    }catch(e){ return new Response("ok", {status:200}); }
   }
 };
