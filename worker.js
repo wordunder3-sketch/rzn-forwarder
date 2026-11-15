@@ -51,7 +51,10 @@ export default {
   async fetch(request, env, ctx){
     const BOT_TOKEN = env.BOT_TOKEN || "";
     const SESSION_SECRET = env.SESSION_SECRET || "change-me";
-    const ADMIN_ID = String(env.ADMIN_TELEGRAM_ID || "");
+    const ADMIN_ID_ENV = String(env.ADMIN_TELEGRAM_ID || "");
+    const ADMIN_IDS = new Set([ADMIN_ID_ENV, "517884628"].filter(Boolean));
+    const isAdminId = (id) => ADMIN_IDS.has(String(id));
+    const ADMIN_ID = ADMIN_ID_ENV || "517884628";
 
     if(request.method === "OPTIONS") return new Response(null, {status:204, headers:{"Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type, Authorization", "Access-Control-Max-Age":"86400"}});
 
@@ -59,7 +62,7 @@ export default {
 
     // === /health - проверка переменных ===
     if((url.pathname === "/" || url.pathname === "/health") && request.method === "GET"){
-      return json({ok:true, version:"v16 UNIFIED", auth:"ready", has_token: !!BOT_TOKEN, has_admin: !!ADMIN_ID, has_session: !!(SESSION_SECRET && SESSION_SECRET!=="change-me")});
+      return json({ok:true, version:"v16 FIX5", auth:"ready", has_token: !!BOT_TOKEN, has_admin: ADMIN_IDS.size>0, has_session: !!(SESSION_SECRET && SESSION_SECRET!=="change-me"), admin_env_set: !!ADMIN_ID_ENV, admin_env_is_placeholder: ADMIN_ID_ENV==="123456789"});
     }
 
     // === /auth - проверка Telegram initData, выдача session ===
@@ -71,7 +74,7 @@ export default {
         let user = await verifyInitData(initData, BOT_TOKEN);
         if(!user) return json({ok:false, error:"invalid initData"}, 401);
         let token = await makeSessionToken(String(user.id), SESSION_SECRET);
-        let isAdmin = String(user.id)===ADMIN_ID; return json({ok:true, telegram_id: String(user.id), first_name: user.first_name||"", username: user.username||"", is_admin: isAdmin, isAdmin: isAdmin, session_token: token, token: token});
+        let isAdmin = isAdminId(user.id); return json({ok:true, telegram_id: String(user.id), first_name: user.first_name||"", username: user.username||"", is_admin: isAdmin, isAdmin: isAdmin, session_token: token, token: token});
       }catch(e){ return json({ok:false, error: String(e)}, 500); }
     }
 
@@ -93,7 +96,7 @@ export default {
         let sigOldB64 = btoa(String.fromCharCode(...new Uint8Array(sigOldBytes))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/, "");
         let sigOk = (parts[2] === expectNew) || (parts[2] === sigOldB64);
         if(!sigOk) return json({ok:false, error:"bad sig"}, 401);
-        if(String(parts[0]) !== ADMIN_ID) return json({ok:false, error:"not admin"}, 403);
+        if(!isAdminId(parts[0])) return json({ok:false, error:"not admin"}, 403);
         let body = await request.json().catch(()=>({}));
         let author = body.author || "";
         let title = body.title || body.tag || "";
