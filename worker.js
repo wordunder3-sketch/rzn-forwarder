@@ -7,7 +7,7 @@
 const FORUM_CHAT_ID = "-1003905818473";
 
 function json(data, status=200){
-  return new Response(JSON.stringify(data), { status, headers: {"Content-Type":"application/json", "Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type"} });
+  return new Response(JSON.stringify(data), { status, headers: {"Content-Type":"application/json", "Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type, Authorization"} });
 }
 
 async function hmacSha256(key, message){
@@ -52,7 +52,7 @@ export default {
     const SESSION_SECRET = env.SESSION_SECRET || "change-me";
     const ADMIN_ID = String(env.ADMIN_TELEGRAM_ID || "");
 
-    if(request.method === "OPTIONS") return new Response(null, {status:204, headers:{"Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type"}});
+    if(request.method === "OPTIONS") return new Response(null, {status:204, headers:{"Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type, Authorization"}});
 
     const url = new URL(request.url);
 
