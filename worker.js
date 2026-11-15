@@ -1,13 +1,13 @@
-// RZN v16 SECURE Worker - BOT_TOKEN только из env, проверка Telegram initData
+// RZN v16 UNIFIED Worker - принимает оба формата токена (new hex + old base64) - BOT_TOKEN только из env, проверка Telegram initData
 // В Cloudflare Dashboard -> Workers -> rzn-forwarder -> Settings -> Variables:
-//  BOT_TOKEN = 903696... (НОВЫЙ после ротации, старый уже утек в фронт)
-//  ADMIN_TELEGRAM_ID = 123456789 (твой Telegram ID, узнай через @userinfobot)
-//  SESSION_SECRET = случайная длинная строка
+//  BOT_TOKEN = только из переменных Cloudflare, в коде НЕТ
+//  ADMIN_TELEGRAM_ID = твой Telegram ID, только в переменных Cloudflare
+//  SESSION_SECRET = только в переменных Cloudflare
 
 const FORUM_CHAT_ID = "-1003905818473";
 
 function json(data, status=200){
-  return new Response(JSON.stringify(data), { status, headers: {"Content-Type":"application/json", "Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type, Authorization"} });
+  return new Response(JSON.stringify(data), { status, headers: {"Content-Type":"application/json", "Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type"} });
 }
 
 async function hmacSha256(key, message){
@@ -52,9 +52,14 @@ export default {
     const SESSION_SECRET = env.SESSION_SECRET || "change-me";
     const ADMIN_ID = String(env.ADMIN_TELEGRAM_ID || "");
 
-    if(request.method === "OPTIONS") return new Response(null, {status:204, headers:{"Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type, Authorization"}});
+    if(request.method === "OPTIONS") return new Response(null, {status:204, headers:{"Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type"}});
 
     const url = new URL(request.url);
+
+    // === /health - проверка переменных ===
+    if((url.pathname === "/" || url.pathname === "/health") && request.method === "GET"){
+      return json({ok:true, version:"v16 UNIFIED", auth:"ready", has_token: !!BOT_TOKEN, has_admin: !!ADMIN_ID, has_session: !!(SESSION_SECRET && SESSION_SECRET!=="change-me")});
+    }
 
     // === /auth - проверка Telegram initData, выдача session ===
     if(url.pathname === "/auth" && request.method === "POST"){
@@ -79,9 +84,14 @@ export default {
         let parts = token.split(".");
         if(parts.length!==3) return json({ok:false, error:"bad token"}, 401);
         let payload = parts[0] + "." + parts[1];
-        let sig = await hmacSha256(new TextEncoder().encode(SESSION_SECRET), payload);
-        let expect = toHex(sig).slice(0,32);
-        if(expect !== parts[2]) return json({ok:false, error:"bad sig"}, 401);
+        // NEW format: hex HMAC slice 0,32
+        let sigNew = await hmacSha256(new TextEncoder().encode(SESSION_SECRET), payload);
+        let expectNew = toHex(sigNew).slice(0,32);
+        // OLD v16 format: base64url of full HMAC
+        let sigOldBytes = sigNew;
+        let sigOldB64 = btoa(String.fromCharCode(...new Uint8Array(sigOldBytes))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/, "");
+        let sigOk = (parts[2] === expectNew) || (parts[2] === sigOldB64);
+        if(!sigOk) return json({ok:false, error:"bad sig"}, 401);
         if(String(parts[0]) !== ADMIN_ID) return json({ok:false, error:"not admin"}, 403);
         let body = await request.json().catch(()=>({}));
         let author = body.author || "";
