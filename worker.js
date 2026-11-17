@@ -1,14 +1,13 @@
-
-// RZN v16 UNIFIED Worker - принимает оба формата токена (new hex + old base64) - BOT_TOKEN только из env, проверка Telegram initData
+// RZN v16 SECURE Worker - BOT_TOKEN только из env, проверка Telegram initData
 // В Cloudflare Dashboard -> Workers -> rzn-forwarder -> Settings -> Variables:
-//  BOT_TOKEN = только из переменных Cloudflare, в коде НЕТ
-//  ADMIN_TELEGRAM_ID = твой Telegram ID, только в переменных Cloudflare
-//  SESSION_SECRET = только в переменных Cloudflare
+//  BOT_TOKEN = 903696... (НОВЫЙ после ротации, старый уже утек в фронт)
+//  ADMIN_TELEGRAM_ID = 123456789 (твой Telegram ID, узнай через @userinfobot)
+//  SESSION_SECRET = случайная длинная строка
 
 const FORUM_CHAT_ID = "-1003905818473";
 
 function json(data, status=200){
-  return new Response(JSON.stringify(data), { status, headers: {"Content-Type":"application/json", "Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type, Authorization"} });
+  return new Response(JSON.stringify(data), { status, headers: {"Content-Type":"application/json", "Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type"} });
 }
 
 async function hmacSha256(key, message){
@@ -51,19 +50,11 @@ export default {
   async fetch(request, env, ctx){
     const BOT_TOKEN = env.BOT_TOKEN || "";
     const SESSION_SECRET = env.SESSION_SECRET || "change-me";
-    const ADMIN_ID_ENV = String(env.ADMIN_TELEGRAM_ID || "");
-    const ADMIN_IDS = new Set([ADMIN_ID_ENV, "517884628"].filter(Boolean));
-    const isAdminId = (id) => ADMIN_IDS.has(String(id));
-    const ADMIN_ID = ADMIN_ID_ENV || "517884628";
+    const ADMIN_ID = String(env.ADMIN_TELEGRAM_ID || "");
 
-    if(request.method === "OPTIONS") return new Response(null, {status:204, headers:{"Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type, Authorization", "Access-Control-Max-Age":"86400"}});
+    if(request.method === "OPTIONS") return new Response(null, {status:204, headers:{"Access-Control-Allow-Origin":"*", "Access-Control-Allow-Methods":"POST, GET, OPTIONS", "Access-Control-Allow-Headers":"Content-Type"}});
 
     const url = new URL(request.url);
-
-    // === /health - проверка переменных ===
-    if((url.pathname === "/" || url.pathname === "/health") && request.method === "GET"){
-      return json({ok:true, version:"v16 FIX5", auth:"ready", has_token: !!BOT_TOKEN, has_admin: ADMIN_IDS.size>0, has_session: !!(SESSION_SECRET && SESSION_SECRET!=="change-me"), admin_env_set: !!ADMIN_ID_ENV, admin_env_is_placeholder: ADMIN_ID_ENV==="123456789"});
-    }
 
     // === /auth - проверка Telegram initData, выдача session ===
     if(url.pathname === "/auth" && request.method === "POST"){
@@ -74,7 +65,7 @@ export default {
         let user = await verifyInitData(initData, BOT_TOKEN);
         if(!user) return json({ok:false, error:"invalid initData"}, 401);
         let token = await makeSessionToken(String(user.id), SESSION_SECRET);
-        let isAdmin = isAdminId(user.id); return json({ok:true, telegram_id: String(user.id), first_name: user.first_name||"", username: user.username||"", is_admin: isAdmin, isAdmin: isAdmin, session_token: token, token: token});
+        let isAdmin = String(user.id)===ADMIN_ID; return json({ok:true, telegram_id: String(user.id), first_name: user.first_name||"", username: user.username||"", is_admin: isAdmin, isAdmin: isAdmin, session_token: token, token: token});
       }catch(e){ return json({ok:false, error: String(e)}, 500); }
     }
 
@@ -88,15 +79,10 @@ export default {
         let parts = token.split(".");
         if(parts.length!==3) return json({ok:false, error:"bad token"}, 401);
         let payload = parts[0] + "." + parts[1];
-        // NEW format: hex HMAC slice 0,32
-        let sigNew = await hmacSha256(new TextEncoder().encode(SESSION_SECRET), payload);
-        let expectNew = toHex(sigNew).slice(0,32);
-        // OLD v16 format: base64url of full HMAC
-        let sigOldBytes = sigNew;
-        let sigOldB64 = btoa(String.fromCharCode(...new Uint8Array(sigOldBytes))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/, "");
-        let sigOk = (parts[2] === expectNew) || (parts[2] === sigOldB64);
-        if(!sigOk) return json({ok:false, error:"bad sig"}, 401);
-        if(!isAdminId(parts[0])) return json({ok:false, error:"not admin"}, 403);
+        let sig = await hmacSha256(new TextEncoder().encode(SESSION_SECRET), payload);
+        let expect = toHex(sig).slice(0,32);
+        if(expect !== parts[2]) return json({ok:false, error:"bad sig"}, 401);
+        if(String(parts[0]) !== ADMIN_ID) return json({ok:false, error:"not admin"}, 403);
         let body = await request.json().catch(()=>({}));
         let author = body.author || "";
         let title = body.title || body.tag || "";
@@ -104,46 +90,27 @@ export default {
         let photo = body.photo || body.imgUrl || body.image_url || "";
         let comment = body.comment || body.year || "";
         if(!photo) return json({ok:false, error:"no photo"}, 400);
-        let cap = (crew?`👥 ${crew} `:'') + `🎨 ${title} | ${comment}\n👤 ${author}`;
-        // helper: sendPhoto с fallback - если Telegram не смог скачать фото по URL, качаем байты в воркере и шлём multipart
-        async function sendPhotoTG(chatId, threadId){
-          let body0 = {chat_id: chatId, photo: photo, caption: cap};
-          if(threadId!==null && threadId!==undefined) body0.message_thread_id = threadId;
-          let r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body0)});
-          let j = await r.json().catch(()=>({ok:false, description:"no json"}));
-          if(j.ok) return j;
-          let desc = String(j.description||"");
-          if(desc.indexOf("failed to get HTTP URL")!==-1 || desc.indexOf("wrong HTTP URL")!==-1){
-            try{
-              let pr = await fetch(photo);
-              if(!pr.ok) return j;
-              let buf = await pr.arrayBuffer();
-              let fd = new FormData();
-              fd.append("chat_id", String(chatId));
-              if(threadId!==null && threadId!==undefined) fd.append("message_thread_id", String(threadId));
-              fd.append("caption", cap);
-              fd.append("photo", new Blob([buf], {type:"image/jpeg"}), "photo.jpg");
-              let r2 = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {method:"POST", body: fd});
-              let j2 = await r2.json().catch(()=>({ok:false, description:"no json multipart"}));
-              return j2;
-            }catch(e){ return j; }
-          }
-          return j;
-        }
+        let _crewTag = String(crew||"").replace(/[^A-Za-zА-Яа-яЁё0-9_]/g,"");
+        let _titleTag = String(title||"").replace(/[^A-Za-zА-Яа-яЁё0-9_]/g,"");
+        let _ym = String(comment||"").match(/(19|20)\d{2}/);
+        let _year = _ym ? _ym[0] : "";
+        let _tags = [];
+        if(_crewTag) _tags.push("#"+_crewTag);
+        if(_titleTag && _year) _tags.push("#"+_titleTag+_year);
+        if(_titleTag) _tags.push("#"+_titleTag);
+        let cap = (crew?`👥 ${crew} `:'') + `🎨 ${title} | ${comment}\n👤 ${author}` + (_tags.length ? `\n${_tags.join(" ")}` : "");
         // 1. В канал
-        let j1 = await sendPhotoTG("@rzn_graffiti_archive", null);
+        let r1 = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({chat_id:"@rzn_graffiti_archive", photo: photo, caption: cap})});
+        let j1 = await r1.json().catch(()=>({ok:false}));
         // 2. В форум архив
         let THREADS_MAP = {"JUST":19,"ДЖАСТ":5,"NGL":6,"HGK":7,"ОПА":342,"OPA":342};
         let upper = (crew+" "+title).toUpperCase();
         let target = null;
         for(const k in THREADS_MAP){ if(upper.includes(k)){ target=THREADS_MAP[k]; break; } }
-        let j2 = await sendPhotoTG(FORUM_CHAT_ID, target);
-        let chOk = !!j1.ok, foOk = !!j2.ok;
-        let errMsg = "";
-        if(!chOk && j1.description) errMsg += "канал: " + j1.description + " ";
-        if(!foOk && j2.description) errMsg += "форум: " + j2.description;
-        errMsg = errMsg.trim();
-        return json({ok: (chOk && foOk), channel: j1, forum: j2, channel_ok: chOk, forum_ok: foOk, error: errMsg || (chOk&&foOk ? "" : "telegram fail"), channel_msg_id: j1.result ? j1.result.message_id : null, forum_msg_id: j2.result ? j2.result.message_id : null});
+        let payload2 = {chat_id: FORUM_CHAT_ID, photo: photo, caption: cap};
+        if(target!==null) payload2.message_thread_id = target;
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload2)});
+        return json({ok: !!j1.ok, channel: j1});
       }catch(e){ return json({ok:false, error: String(e)}, 500); }
     }
 
